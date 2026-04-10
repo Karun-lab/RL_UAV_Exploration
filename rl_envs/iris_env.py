@@ -41,7 +41,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.utils import configclass
-from isaaclab_assets.robots.iris import IRIS_CFG
+from rl_WorkSpace.models.drone import IRIS_CFG
 
 # Scene
 @configclass
