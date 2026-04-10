@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Isaac / RL outputs
+logs/
+checkpoints/
+*.pt
+*.pth
+
+# VSCode / system
+.vscode/
+.DS_Store
