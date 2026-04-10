@@ -14,9 +14,8 @@ a more user-friendly way.
 
 import argparse
 import sys
-
+sys.path.insert(0, "/workspace/isaaclab")
 from isaaclab.app import AppLauncher
-
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with skrl.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
@@ -61,7 +60,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 """Rest everything follows."""
-
+import rl_WorkSpace  # noqa: F401 — triggers gym.register() calls
 import gymnasium as gym
 import os
 import random

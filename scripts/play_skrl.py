@@ -11,10 +11,12 @@ a more user-friendly way.
 """
 
 """Launch Isaac Sim Simulator first."""
-
+import sys
+sys.path.insert(0, "/workspace/isaaclab")
 import argparse
 
 from isaaclab.app import AppLauncher
+
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from skrl.")
@@ -59,7 +61,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 """Rest everything follows."""
-
+import rl_WorkSpace  # noqa: F401 — triggers gym.register() calls
 import gymnasium as gym
 import os
 import time

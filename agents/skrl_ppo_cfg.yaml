@@ -47,7 +47,7 @@ agent:
   clip_predicted_values: True
   entropy_loss_scale: 0.0
   experiment:
-    directory: "iris_direct"
+    directory: "iris_target" 
     experiment_name: "default"
     write_interval: auto
     checkpoint_interval: auto
