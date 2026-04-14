@@ -1,4 +1,5 @@
 # skrl_ppo_maze_cfg.yaml
+# PPO config for IrisMazeEnv — hardcoded maze, 1 drone, depth camera
 seed: 42
 
 models:
@@ -32,7 +33,7 @@ memory:
 
 agent:
   class: PPO
-  rollouts: 96
+  rollouts: 128
   learning_epochs: 8
   mini_batches: 8
   discount_factor: 0.99
@@ -47,14 +48,14 @@ agent:
   ratio_clip: 0.2
   grad_norm_clip: 1.0
   clip_predicted_values: True
-  entropy_loss_scale: 0.01
+  entropy_loss_scale: 0.05
   experiment:
     directory: "iris_maze"
-    experiment_name: "stage3_maze_3drones"
+    experiment_name: "hardcoded_maze_depth"
     write_interval: auto
     checkpoint_interval: auto
 
 trainer:
   class: SequentialTrainer
-  timesteps: 2000000
+  timesteps: 100000
   environment_info: log

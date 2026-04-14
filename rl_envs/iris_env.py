@@ -7,7 +7,7 @@ To change spawn position: change SPAWN_POS below.
 Run:
     from /workspace/isaaclab
 
-    /isaac-sim/python.sh source/isaaclab_tasks/isaaclab_tasks/direct/iris/iris_env.py --livestream 2
+    /isaac-sim/python.sh /workspace/isaaclab/rl_WorkSpace/rl_envs/iris_env.py --livestream 2
 
 """
 
@@ -17,8 +17,7 @@ from isaaclab.app import AppLauncher
 
 # EDIT THESE to switch environment or spawn position
 USD_PATH = (
-    "/workspace/isaaclab/source/isaaclab_tasks/"
-    "isaaclab_tasks/direct/iris/environments/TestEnvOfficeA.usd"
+    "/workspace/isaaclab/rl_WorkSpace/models/environments/TestEnvOfficeA.usd"
 )
 # Options:
 #   TestEnvOfficeA.usd  /  TestEnvOfficeB.usd  /  TestEnvOfficeC.usd
