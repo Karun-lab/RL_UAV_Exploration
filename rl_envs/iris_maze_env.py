@@ -35,7 +35,7 @@ Train:
         --task Isaac-Iris-Maze-v0 --num_envs 32 --headless --enable_cameras
 
 Play:
-    CUDA_VISIBLE_DEVICES=0 /isaac-sim/python.sh rl_WorkSpace/scripts/play_skrl.py \
+    CUDA_VISIBLE_DEVICES=1 /isaac-sim/python.sh rl_WorkSpace/scripts/play_skrl.py \
         --task Isaac-Iris-Maze-v0 --num_envs 1 --livestream 2 --enable_cameras
 """
 
@@ -121,12 +121,20 @@ WALL_AABBS: np.ndarray = np.array(
 class IrisMazeEnvCfg(DirectRLEnvCfg):
 
     # Episode
-    episode_length_s  = 120.0
+    episode_length_s  = 90.0
     decimation        = 2
     action_space      = 2    # [v_forward, yaw_rate]
-    observation_space = 13   # lin_vel(3)+ang_vel(3)+gravity(3)+frontier_b(3)+coverage(1)
+    observation_space = 16   # lin_vel(3)+ang_vel(3)+gravity(3)+frontier_b(3)+coverage(1)+depth-opening(2)
     state_space       = 0
     debug_vis         = False
+    # Success condition: episode ends with large bonus when this fraction
+    # of the navigable area is discovered. 0.85 = 85% coverage.
+    success_coverage_threshold: float = 0.85
+    success_bonus:              float = 100.0   # large one-time reward on success
+    time_penalty_per_step:      float = -0.15
+
+    # Minimum forward progress threshold for stagnation (metres)
+    stagnation_min_displacement: float = 2.5
 
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 100,
@@ -227,10 +235,13 @@ class IrisMazeEnvCfg(DirectRLEnvCfg):
     new_cell_reward_scale: float =  5.0
     frontier_reward_scale: float =  3.0
     ang_vel_penalty_scale: float = -0.01
-    revisit_penalty_scale: float = -0.1
+    revisit_penalty_scale: float = -0.2
     out_of_bounds_penalty: float = -5.0
-    collision_penalty:     float = -10.0
-
+    collision_penalty:     float = -5.0
+    # Milestone bonuses — one-time rewards at coverage thresholds
+    milestone_25_bonus:  float = 15.0
+    milestone_50_bonus:  float = 30.0
+    milestone_75_bonus:  float = 60.0
     # -----------------------------------------------------------------------
     # Logging
     # -----------------------------------------------------------------------
@@ -256,20 +267,33 @@ class IrisMazeEnv(DirectRLEnv):
         self._frontier_pos_w  = torch.zeros(N, 3, device=self.device)
         self._actions         = torch.zeros(N, 2, device=self.device)
         self._prev_frontier_dist = torch.zeros(N, device=self.device)
+        # Milestone tracking — shape (N,) bool, True once that milestone is claimed
+        # Stored as uint8 to avoid issues with bool tensor indexing on CUDA
+        self._milestone_claimed = np.zeros((self.num_envs, 3), dtype=np.uint8)
+        # Columns: 0=25%, 1=50%, 2=75%
 
-        # self._episode_sums = {
-        #     key: torch.zeros(N, dtype=torch.float, device=self.device)
-        #     for key in ["new_cells", "frontier","progress", "ang_vel",
-        #                 "revisit", "out_of_bounds", "collision"]
-        # }
+
         self._episode_sums = {
             key: torch.zeros(N, dtype=torch.float, device=self.device)
-            for key in ["new_cells", "frontier","progress", "ang_vel",
-                        "revisit", "out_of_bounds","frontier_prox","directed", "idle","collision"]
+            for key in ["new_cells", "ang_vel", "cov_rate","stagnation","motion","success","time",
+                         "out_of_bounds","milestone","collision",]
         }
+
         self._step_counter = 0
         self._precompute_ray_angles()
         self.set_debug_vis(self.cfg.debug_vis)
+
+        N_HISTORY = 200   # steps — at decimation=2, dt=0.01: 200 steps = 2 seconds
+        self._pos_history = torch.zeros(
+            self.num_envs, N_HISTORY, 2, device=self.device
+        )
+        self._history_idx  = 0
+        self._pos_history_filled = False
+
+        # For coverage rate reward
+        self._coverage_at_last_check = np.zeros(self.num_envs, dtype=np.float32)
+        self._coverage_check_interval = 50   # steps
+        self._prev_frontier_dist = torch.zeros(self.num_envs, device=self.device)
 
     # ------------------------------------------------------------------
     # Camera ray precomputation
@@ -488,9 +512,96 @@ class IrisMazeEnv(DirectRLEnv):
             dr = np.clip(int((half_y - oy) / cs), 0, NR-1)
             self._grid[i, dr, dc] = FREE
 
-    # ------------------------------------------------------------------
+    def _get_depth_opening(self) -> torch.Tensor:
+        """
+        Find the direction of the largest open gap in the current depth scan.
+        Returns a (N, 2) tensor: [gap_angle_sin, gap_distance] per env.
+        This gives the policy a direct "where to go" signal from raw depth.
+
+        Algorithm:
+        1. Average depth slice → 1D scan
+        2. Smooth with a window to reduce noise
+        3. Find the column with maximum depth (largest opening)
+        4. Convert column index → angle relative to drone heading
+        5. Return [sin(angle), max_depth / max_range] as normalised features
+        """
+        depth_data = self._camera.data.output.get("distance_to_image_plane")
+        result = torch.zeros(self.num_envs, 3, device=self.device)
+
+        if depth_data is None:
+            return result
+
+        if isinstance(depth_data, torch.Tensor):
+            d = depth_data.cpu().numpy()
+        else:
+            d = np.array(depth_data)
+
+        # Normalise to (N, H, W, 1)
+        if d.ndim == 2:
+            d = d[np.newaxis, :, :, np.newaxis]
+        elif d.ndim == 3:
+            d = d[np.newaxis] if d.shape[-1] == 1 else d[:, :, :, np.newaxis]
+
+        W = self.cfg.cam_width
+
+        for i in range(self.num_envs):
+            scan = np.nanmean(d[i, self._slice_rows, :, 0], axis=0)  # (W,)
+
+            # Replace invalid with 0
+            scan = np.where(
+                (scan > self.cfg.cam_min_depth) & np.isfinite(scan),
+                scan, 0.0
+            )
+
+            # Smooth: running average over 20-pixel window
+            kernel = np.ones(20) / 20.0
+            scan_smooth = np.convolve(scan, kernel, mode='same')
+
+            # Best column = largest depth (most open direction)
+            best_col = int(np.argmax(scan_smooth))
+            best_depth = float(scan_smooth[best_col])
+
+            # Convert column → angle offset from camera centre
+            angle_offset = self._ray_offsets[best_col]   # radians
+
+            # result[i, 0] = float(np.sin(angle_offset))             # direction
+            # result[i, 1] = min(best_depth / self.cfg.cam_max_depth, 1.0)  # normalised depth
+            
+
+            result[i, 0] = float(np.sin(angle_offset)) 
+            result[i, 1] = float(np.cos(angle_offset)) 
+            result[i, 2] = best_depth / self.cfg.cam_max_depth
+
+        return result
+
+
+    def _get_stagnation_penalty(self) -> torch.Tensor:
+        """
+        Returns a penalty tensor (N,) that is -1 if the drone has not moved
+        more than 0.5 m in the last N_HISTORY steps, else 0.
+        Directly penalises spinning in place or looping.
+        """
+        current_pos = self._robot.data.root_pos_w[:, :2]   # (N, 2)
+
+        # Write current pos into history ring buffer
+        self._pos_history[:, self._history_idx, :] = current_pos.detach()
+        self._history_idx = (self._history_idx + 1) % self._pos_history.shape[1]
+
+        if not self._pos_history_filled:
+            if self._history_idx == 0:
+                self._pos_history_filled = True
+            return torch.zeros(self.num_envs, device=self.device)
+
+        # Compare current pos to the oldest recorded pos
+        oldest_idx = self._history_idx  # next write = oldest data
+        oldest_pos = self._pos_history[:, oldest_idx, :]   # (N, 2)
+        displacement = torch.linalg.norm(current_pos - oldest_pos, dim=1)  # (N,)
+
+        # Penalise if total displacement over the window < 0.5 m
+        stagnant = (displacement < 0.5).float()
+        return stagnant * -1.0
+
     # Frontier detection
-    # ------------------------------------------------------------------
     def _compute_frontiers(self) -> np.ndarray:
         NR    = self.cfg.grid_rows
         NC    = self.cfg.grid_cols
@@ -532,26 +643,17 @@ class IrisMazeEnv(DirectRLEnv):
                 ]
                 continue
 
-            # dists = (np.abs(fronts[:,0] - drone_rows[i]) +
-            #          np.abs(fronts[:,1] - drone_cols[i]))
-            # best  = fronts[np.argmin(dists)]
-            
-            # sample among top-K far frontiers
-            K = min(10, len(fronts))
-            dists = np.abs(fronts[:,0] - drone_rows[i]) + np.abs(fronts[:,1] - drone_cols[i])
-            idxs = np.argsort(dists)
-            # pick randomly from farther frontiers
-            choice = np.random.choice(idxs[K//2:K]) if K > 5 else idxs[0]
-            best = fronts[choice]
+            dists = (np.abs(fronts[:,0] - drone_rows[i]) +
+                     np.abs(fronts[:,1] - drone_cols[i]))
+            best  = fronts[np.argmin(dists)]
             
             wx, wy = self._grid_to_world(best[0], best[1], i)
             result[i] = [wx, wy]
 
         return result
 
-    # ------------------------------------------------------------------
+
     # Collision and bounds
-    # ------------------------------------------------------------------
     def _get_collisions(self) -> np.ndarray:
         pos_np  = self._robot.data.root_pos_w.cpu().numpy()
         origins = self._terrain.env_origins.cpu().numpy()
@@ -576,9 +678,7 @@ class IrisMazeEnv(DirectRLEnv):
         local   = pos_np[:, :2] - origins
         return (np.abs(local[:,0]) > half_x) | (np.abs(local[:,1]) > half_y)
 
-    # ------------------------------------------------------------------
-    # Observations
-    # ------------------------------------------------------------------
+ 
     def _get_observations(self) -> dict:
         self._update_grid_from_depth()
 
@@ -611,103 +711,188 @@ class IrisMazeEnv(DirectRLEnv):
             device=self.device,
         ).unsqueeze(1)
 
+        depth_opening = self._get_depth_opening()   # (N, 2)
+
         obs = torch.cat([
-            self._robot.data.root_lin_vel_b,
-            self._robot.data.root_ang_vel_b,
-            self._robot.data.projected_gravity_b,
-            frontier_b,
-            cov,
-        ], dim=-1)
+            self._robot.data.root_lin_vel_b,       # 3
+            self._robot.data.root_ang_vel_b,       # 3
+            self._robot.data.projected_gravity_b,  # 3
+            frontier_b,                            # 3
+            cov,                                   # 1
+            depth_opening,                         # 2  [gap_direction, gap_distance]
+        ], dim=-1)                                 # total: 15
 
         return {"policy": obs}
 
-    # ------------------------------------------------------------------
-    # Rewards
-    # ------------------------------------------------------------------
+    def _log_reward_breakdown(self, rewards: dict, step: int, interval: int = 100):
+        """
+        Prints a readable reward breakdown every `interval` steps.
+        Call this at the end of _get_rewards before returning.
+        """
+        if step % interval != 0:
+            return
+
+        print(f"\n{'='*60}")
+        print(f"[REWARD BREAKDOWN]  step={step}")
+        print(f"{'='*60}")
+
+        total = torch.zeros(self.num_envs, device=self.device)
+        for key, val in rewards.items():
+            mean_val = val.mean().item()
+            total   += val
+            bar_len  = int(abs(mean_val) * 20)
+            bar      = ("+" if mean_val >= 0 else "-") * min(bar_len, 40)
+            print(f"  {key:<20} {mean_val:+8.4f}  {bar}")
+
+        print(f"  {'TOTAL':<20} {total.mean().item():+8.4f}")
+
     def _get_rewards(self) -> torch.Tensor:
-        # --- New cells: the primary reward ---
+
+        # ── 1. New cells discovered this step ─────────────────────────────
         free_c    = (self._grid == FREE).sum(axis=(1,2)).astype(np.int32)
         new_cells = np.maximum(0, free_c - self._prev_free_count)
         self._prev_free_count = free_c.copy()
         nc_t = torch.tensor(new_cells, dtype=torch.float, device=self.device)
 
-        # --- Frontier: reward for facing and moving toward frontier ---
-        dist = torch.linalg.norm(
-            self._frontier_pos_w - self._robot.data.root_pos_w, dim=1
+        # ── 2. Coverage rate (every N steps) ──────────────────────────────
+        cov_rate = torch.zeros(self.num_envs, device=self.device)
+        if self._step_counter % self._coverage_check_interval == 0:
+            current_cov = (self._grid == FREE).mean(
+                axis=(1, 2)
+            ).astype(np.float32)
+            delta = np.maximum(0.0, current_cov - self._coverage_at_last_check)
+            self._coverage_at_last_check = current_cov.copy()
+            cov_rate = torch.tensor(delta * 100.0, device=self.device)
+
+        # ── 3. NBV opening signal ─────────────────────────────────────────
+        depth_opening = self._get_depth_opening()   # (N, 2)
+        gap_direction = depth_opening[:, 0]         # sin of best gap angle
+        gap_distance  = depth_opening[:, 1]         # normalised depth [0,1]
+        facing_opening = (1.0 - gap_direction.abs()) * gap_distance
+        forward_vel    = self._robot.data.root_lin_vel_b[:, 0].clamp(min=0.0)
+        motion_reward  = facing_opening * forward_vel
+
+        # ── 4. Stagnation ─────────────────────────────────────────────────
+        stagnation = self._get_stagnation_penalty()   # (N,) 0 or -1
+
+        # ── 5. Time penalty — paid every step, no exceptions ──────────────
+        # This is the core forcing function. The drone MUST discover new
+        # cells faster than it accumulates time debt, or it will score
+        # negatively and learn that doing nothing is the worst strategy.
+        time_penalty = torch.full(
+            (self.num_envs,),
+            self.cfg.time_penalty_per_step,
+            device=self.device,
         )
 
-        # Heading alignment: cosine between drone forward and frontier direction
-        quat_w     = self._robot.data.root_state_w[:, 3:7]
-        forward_b  = torch.zeros(self.num_envs, 3, device=self.device)
-        forward_b[:, 0] = 1.0
-        forward_w  = quat_rotate(quat_w, forward_b)
-        to_frontier = self._frontier_pos_w - self._robot.data.root_pos_w
-        to_frontier[:, 2] = 0.0   # project to horizontal
-        to_frontier_norm = torch.linalg.norm(to_frontier, dim=1, keepdim=True).clamp(min=1e-6)
-        to_frontier_unit = to_frontier / to_frontier_norm
-        heading_align = (forward_w * to_frontier_unit).sum(dim=1)  # cosine [-1, 1]
+        # ── 6. Success bonus ──────────────────────────────────────────────
+        # One-time large reward when coverage threshold is reached.
+        # _get_dones already computed _succeeded this step.
+        success_bonus = (
+            getattr(self, "_succeeded", torch.zeros(self.num_envs, dtype=torch.bool, device=self.device))
+            .float() * self.cfg.success_bonus
+        )
 
-        # Forward velocity (positive = moving forward)
-        forward_vel = self._robot.data.root_lin_vel_b[:, 0]
+        # ── 7. Standard penalties ─────────────────────────────────────────
+        ang_vel  = torch.sum(
+            torch.square(self._robot.data.root_ang_vel_b), dim=1
+        )
+        oob      = torch.tensor(
+            self._is_oob().astype(np.float32), device=self.device
+        )
+        collided = torch.tensor(
+            self._get_collisions().astype(np.float32), device=self.device
+        )
+        # ── 8. Milestone bonuses ──────────────────────────────────────────────────
+        total_cells   = self.cfg.grid_rows * self.cfg.grid_cols
+        coverage_frac = (self._grid == FREE).sum(axis=(1, 2)) / total_cells  # (N,) float
 
-        # Combined: reward for moving forward WHILE facing frontier
-        # This specifically rewards the yaw-then-advance behaviour
-        directed_motion = (heading_align.clamp(min=0.0) * forward_vel.clamp(min=0.0))
+        milestone_thresholds = [0.25, 0.50, 0.75]
+        milestone_bonuses    = [
+            self.cfg.milestone_25_bonus,
+            self.cfg.milestone_50_bonus,
+            self.cfg.milestone_75_bonus,
+        ]
 
-        # --- Penalties ---
-        ang_vel  = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
-        oob      = torch.tensor(self._is_oob().astype(np.float32),         device=self.device)
-        collided = torch.tensor(self._get_collisions().astype(np.float32), device=self.device)
+        milestone_reward = np.zeros(self.num_envs, dtype=np.float32)
+        for col, (thresh, bonus) in enumerate(zip(milestone_thresholds, milestone_bonuses)):
+            just_reached = (
+                (coverage_frac >= thresh) &            # coverage is past threshold
+                (self._milestone_claimed[:, col] == 0) # haven't claimed this yet
+            )
+            milestone_reward[just_reached] += bonus
+            self._milestone_claimed[just_reached, col] = 1   # mark as claimed
 
-        # Strong idle penalty: punish doing nothing harder than small rotation
-        is_idle = (forward_vel.abs() < 0.1) & (self._robot.data.root_ang_vel_b[:, 2].abs() < 0.2)
-        idle_penalty = is_idle.float() * -0.5
+        milestone_t = torch.tensor(milestone_reward, dtype=torch.float, device=self.device)
 
         rewards = {
-            # Discovering new cells is the main objective
-            "new_cells":     nc_t           *  8.0,
-            # Moving toward frontier while facing it
-            "directed":      directed_motion *  2.0,
-            # Small proximity signal — keep this weak
-            "frontier_prox": (1.0 - torch.tanh(dist / 3.0)) * 0.5 * self.step_dt,
-            # Penalties
-            "idle":          idle_penalty,
-            "ang_vel":       ang_vel  * -0.005 * self.step_dt,
-            "out_of_bounds": oob      * -5.0,
-            "collision":     collided * -10.0,
+            # ── Exploration rewards ──────────────────────────────────────
+            "new_cells":   nc_t        * 10.0,   # raised: discovering space
+            "cov_rate":    cov_rate    *  6.0,   # rate of discovery matters
+            "motion":      motion_reward * 3.0,  # move toward openings
+            "milestone":   milestone_t,  
+            "success":     success_bonus,        # complete the task
+
+            # ── Penalties ────────────────────────────────────────────────
+            "time":        time_penalty,         # every step costs — must explore
+            "stagnation":  stagnation   *  5.0,  # not moving is extra painful
+            "ang_vel":     ang_vel * -0.005 * self.step_dt,
+            "out_of_bounds": oob    * -5.0,
+            "collision":   collided * -5.0,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
         for key, value in rewards.items():
             self._episode_sums[key] += value
 
+        # ── Diagnostic printout ───────────────────────────────────────────
+        self._log_reward_breakdown(rewards, self._step_counter, interval=100)
+
         total_cells = self.cfg.grid_rows * self.cfg.grid_cols
         self.extras["log"] = {
-            "coverage_pct":   float((self._grid==FREE).mean() * 100.0),
-            "collision_rate": float(collided.mean().item()),
-            "mean_new_cells": float(nc_t.mean().item()),
-            "heading_align":  float(heading_align.mean().item()),
-            "idle_rate":      float(is_idle.float().mean().item()),
+            "coverage_pct":    float((self._grid == FREE).mean() * 100.0),
+            "collision_rate":  float(collided.mean().item()),
+            "stagnation_rate": float((stagnation < 0).float().mean().item()),
+            "gap_distance":    float(gap_distance.mean().item()),
+            "mean_new_cells":  float(nc_t.mean().item()),
+            "success_rate":    float(
+                getattr(self, "_succeeded",
+                        torch.zeros(self.num_envs, device=self.device)
+                ).float().mean().item()
+            ),
         }
 
         return reward
 
-    # ------------------------------------------------------------------
     # Termination
-    # ------------------------------------------------------------------
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+
         alt_fail = (
             (self._robot.data.root_pos_w[:, 2] < 0.1) |
             (self._robot.data.root_pos_w[:, 2] > 3.0)
         )
         oob      = torch.tensor(self._is_oob(),         device=self.device)
         collided = torch.tensor(self._get_collisions(), device=self.device)
-        return alt_fail | oob | collided, time_out
 
-    # ------------------------------------------------------------------
+        # ── Success condition ──────────────────────────────────────────────
+        total_cells    = self.cfg.grid_rows * self.cfg.grid_cols
+        free_counts    = (self._grid == FREE).sum(axis=(1, 2))
+        coverage_ratio = free_counts / total_cells
+        succeeded      = torch.tensor(
+            coverage_ratio >= self.cfg.success_coverage_threshold,
+            device=self.device,
+        )
+        # Success counts as a termination (done=True) so the episode ends
+        # and the success bonus is collected. It is NOT a failure.
+        self._succeeded = succeeded   # store for reward function to read
+
+        died = alt_fail | oob | collided
+        # Terminate on success OR failure — time_out is the fallback
+        return died | succeeded, time_out
+
+
     # Reset
-    # ------------------------------------------------------------------
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
@@ -725,6 +910,7 @@ class IrisMazeEnv(DirectRLEnv):
         self._prev_free_count[env_ids_np] = 0
         self._frontier_pos_w[env_ids]     = 0.0
         self._prev_frontier_dist[env_ids] = 0.0
+        self._milestone_claimed[env_ids_np] = 0
 
         for env_id in env_ids_np:
             eid_t  = torch.tensor([env_id], device=self.device)
@@ -753,9 +939,8 @@ class IrisMazeEnv(DirectRLEnv):
             jv = self._robot.data.default_joint_vel[eid_t]
             self._robot.write_joint_state_to_sim(jp, jv, None, eid_t)
 
-    # ------------------------------------------------------------------
+
     # Grid PNG export
-    # ------------------------------------------------------------------
     def _save_grid_png(self, grid: np.ndarray, path: str):
         import struct, zlib
         NR, NC = grid.shape
@@ -780,9 +965,8 @@ class IrisMazeEnv(DirectRLEnv):
                     + chunk(b'IDAT', zlib.compress(raw))
                     + chunk(b'IEND', b''))
 
-    # ------------------------------------------------------------------
+
     # Debug visualisation
-    # ------------------------------------------------------------------
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:
             if not hasattr(self, "_frontier_vis"):
@@ -800,9 +984,8 @@ class IrisMazeEnv(DirectRLEnv):
             self._frontier_vis.visualize(self._frontier_pos_w)
 
 
-# ---------------------------------------------------------------------------
+
 # Utility
-# ---------------------------------------------------------------------------
 def quat_rotate(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     w   = q[:, 0:1]
     xyz = q[:, 1:]

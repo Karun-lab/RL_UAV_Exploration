@@ -1,31 +1,32 @@
-# skrl_ppo_maze_cfg.yaml
-# PPO config for IrisMazeEnv — hardcoded maze, 1 drone, depth camera
 seed: 42
 
 models:
-  separate: False
+  separate: False          # ← was missing: shared encoder for policy+value
+
   policy:
     class: GaussianMixin
     clip_actions: False
     clip_log_std: True
     min_log_std: -20.0
     max_log_std: 2.0
-    initial_log_std: 0.0
+    initial_log_std: 0.0   # ← was missing: controls initial exploration spread
     network:
       - name: net
         input: STATES
-        layers: [256, 128, 64]
+        layers: [512, 256, 128]
         activations: elu
-    output: ACTIONS
+    output: ACTIONS          # ← critical: tells SKRL to use action_space size (2),
+                             #   not the last layer size (128)
+
   value:
     class: DeterministicMixin
     clip_actions: False
     network:
       - name: net
         input: STATES
-        layers: [256, 128, 64]
+        layers: [512, 256, 128]
         activations: elu
-    output: ONE
+    output: ONE              # ← was missing: tells SKRL this outputs a scalar value
 
 memory:
   class: RandomMemory
@@ -33,25 +34,26 @@ memory:
 
 agent:
   class: PPO
-  rollouts: 128
+  rollouts: 64
   learning_epochs: 8
   mini_batches: 8
   discount_factor: 0.995
   lambda: 0.95
-  learning_rate: 2.0e-04
+  learning_rate: 1.0e-04
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.008
+    kl_threshold: 0.01
   state_preprocessor: RunningStandardScaler
   value_preprocessor: RunningStandardScaler
-  value_loss_scale: 2.0
+  value_loss_scale: 0.5
   ratio_clip: 0.2
-  grad_norm_clip: 1.0
+  grad_norm_clip: 0.5
   clip_predicted_values: True
-  entropy_loss_scale: 0.05
+  entropy_loss_scale: 0.02
+
   experiment:
-    directory: "iris_maze_v1"
-    experiment_name: "hardcoded_maze_depth"
+    directory: "iris_explore_icm"
+    experiment_name: "cnn_depth_mlp_state"
     write_interval: auto
     checkpoint_interval: auto
 
