@@ -1,108 +1,196 @@
 """
 iris_ball_env.py
 ================
-Iris drone learns to:
-  1. Search by yawing when the yellow ball is not visible
-  2. Yaw to centre the ball in frame when visible
-  3. Fly toward the ball
-  4. Stop at stop_distance and hover
+Iris drone learns to find and hover near a yellow ball using RGB vision.
 
-The entire task is solved from RGB vision only — no GPS, no pose of the ball.
-This is a faithful drone equivalent of the Jetbot red-object tracking task.
+Behaviours learned (in order of emergence):
+    1. Search  — yaw when ball not visible
+    2. Align   — yaw to centre ball in frame
+    3. Approach — fly toward ball
+    4. Stop    — hold hover at stop_distance
 
-Observation: (N, T, H, W, 4) stacked frames
-    channels 0-2: RGB normalised [0,1]
-    channel    3: search_active [0 or 1] — tells policy if it should be searching
-
-Why channel 3 (search_active)?
-    When ball is not visible, the policy needs to know to rotate rather than
-    fly forward. Encoding this as a spatial channel (same as jetbot's goal vec)
-    keeps the input format identical to what the CNN expects.
-
-Action: [vx, yaw_rate] in [-1, 1]
-    vx:       forward velocity command
-    yaw_rate: rotation command
-
-Rewards are vision-based — the policy never receives the ball's world position.
-All spatial awareness comes from the camera.
+Actions : [vx, yaw_rate]  in [-1, 1]
+Obs     : (T=3, 64, 64, 4) stacked RGB + search_active channel
 """
- 
-from __future__ import annotations
 
+from __future__ import annotations
 import math
-import torch
 import numpy as np
+import torch
 
 import isaaclab.sim as sim_utils
-import isaaclab.utils.math as math_utils
-from isaaclab.assets import Articulation, RigidObject
-from isaaclab.envs import DirectRLEnv
+from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg, AssetBaseCfg
+from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.sensors import TiledCamera
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCamera, TiledCameraCfg
+from isaaclab.sim import SimulationCfg
+from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-
-from .iris_ball_env_cfg import IrisBallEnvCfg
+import gymnasium as gym
+from isaaclab_assets.robots.iris import IRIS_CFG
 
 
 # =============================================================================
-# YELLOW DETECTION HELPER
+# CONFIG
 # =============================================================================
 
-def _detect_yellow(rgb: torch.Tensor, threshold: float = 0.005):
+@configclass
+class IrisBallEnvCfg(DirectRLEnvCfg):
+
+    episode_length_s = 30.0
+    decimation       = 2
+
+    sim: SimulationCfg = SimulationCfg(
+        dt=1 / 100,
+        render_interval=decimation,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+    )
+
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=64,
+        env_spacing=12.0,
+        replicate_physics=True,
+    )
+
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
+    )
+
+    sky_light: AssetBaseCfg = AssetBaseCfg(
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(intensity=1500.0, color=(1.0, 0.98, 0.95)),
+    )
+
+    robot: ArticulationCfg = IRIS_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot"
+    )
+
+    ball: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Ball",
+        spawn=sim_utils.SphereCfg(
+            radius=0.15,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 0.95, 0.0),
+                emissive_color=(0.3, 0.28, 0.0),
+                roughness=0.5,
+                metallic=0.0,
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(3.0, 0.0, 0.9)),
+    )
+
+    tiled_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Robot/quadrotor/body/TrackCam",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.1, 0.0, 0.0),
+            rot=(-0.5, -0.5, 0.5, 0.5),
+            convention="opengl",
+        ),
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 20.0),
+        ),
+        width=64,
+        height=64,
+    )
+
+    # Motion
+    max_forward_vel:  float = 1.5
+    max_yaw_rate:     float = 2.0
+    hover_height:     float = 0.9
+    altitude_kp:      float = 3.0
+    max_altitude_vel: float = 1.5
+
+    # Observation: (T=3, H=64, W=64, C=4)
+    history_len:  int = 3
+    num_channels: int = 4
+
+    observation_space = gym.spaces.Box(
+        low=0.0, high=1.0, shape=(3, 64, 64, 4), dtype=float
+    )
+    action_space  = gym.spaces.Box(low=-1.0, high=1.0, shape=(2,))
+    state_space   = gym.spaces.Box(low=-float("inf"), high=float("inf"), shape=(0,))
+
+    # Ball spawn
+    ball_min_dist: float = 1.5
+    ball_max_dist: float = 3.5
+
+    # Rewards — optimised for fast learning
+    # Higher approach + alignment scales surface the task signal early.
+    # Higher hover scale makes stopping clearly better than overshooting.
+    # Low search scale just prevents idle hovering — not a training objective.
+    # Tighter time penalty forces efficiency without crushing exploration.
+    # stop_distance:   float = 0.5
+    # approach_scale:  float = 8.0    # was 3.0
+    alignment_scale: float = 3.0    # was 2.0
+    # hover_scale:     float = 3.0    # was 1.5
+    search_scale:    float = 0.05    # was 0.5 then 0.2 
+    success_bonus:   float = 100.0  # was 50.0
+    # time_penalty:    float = -0.05  # was -0.02
+    yellow_threshold: float = 0.002
+
+    approach_scale: float = 5.0
+    hover_scale:    float = 10.0   # large — makes stopping at ball very attractive
+    time_penalty:   float = -0.1
+    stop_distance:  float = 0.6
+ 
+
+# =============================================================================
+# YELLOW DETECTION
+# =============================================================================
+
+def _detect_yellow(rgb: torch.Tensor, threshold: float):
     """
-    Detect yellow pixels in an RGB image tensor.
-
-    Yellow: high R, high G, low B.
-    Thresholds tuned for the emissive yellow material defined in cfg.
-
-    Args:
-        rgb:       (N, H, W, 3) float32 in [0, 1]
-        threshold: fraction of pixels that must be yellow for "ball visible"
-
-    Returns:
-        visible:    (N,) bool — True if ball detected
-        cx_norm:    (N,) float — horizontal centroid of yellow pixels, [-1,1]
-                    0 = centre, -1 = left edge, +1 = right edge
-        area_norm:  (N,) float — fraction of pixels that are yellow [0,1]
+    Detect yellow pixels in (N, H, W, 3) float image in [0, 1].
+    Yellow: high R+G, low B.
+    Returns: visible (N,) bool, cx_norm (N,) in [-1,1], area (N,) float
     """
-    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    r, g, b  = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    mask     = (r > 0.6) & (g > 0.5) & (b < 0.35)
+    N, H, W  = rgb.shape[:3]
+    area     = mask.float().sum(dim=(1, 2)) / (H * W)
+    visible  = area > threshold
 
-    # Yellow: R > 0.6, G > 0.5, B < 0.35
-    yellow_mask = (r > 0.6) & (g > 0.5) & (b < 0.35)   # (N, H, W)
-
-    N, H, W    = rgb.shape[:3]
-    pixel_count = H * W
-
-    area = yellow_mask.float().sum(dim=(1, 2)) / pixel_count   # (N,)
-    visible = area > threshold                                  # (N,)
-
-    # Horizontal centroid — where in the frame is the ball?
-    col_idx = torch.arange(W, device=rgb.device, dtype=torch.float32)
-    col_idx = col_idx.view(1, 1, W).expand(N, H, W)            # (N, H, W)
-
-    yellow_float = yellow_mask.float()
-    sum_cols = (yellow_float * col_idx).sum(dim=(1, 2))
-    sum_area = yellow_float.sum(dim=(1, 2)).clamp(min=1.0)
-
-    cx_pixel = sum_cols / sum_area                             # (N,) in [0, W)
-    cx_norm  = (cx_pixel / (W - 1)) * 2.0 - 1.0              # (N,) in [-1, 1]
-
-    # For non-visible envs, centroid is meaningless — zero it
-    cx_norm = cx_norm * visible.float()
+    col_idx  = torch.arange(W, device=rgb.device, dtype=torch.float32).view(1, 1, W).expand(N, H, W)
+    mask_f   = mask.float()
+    cx_pixel = (mask_f * col_idx).sum(dim=(1, 2)) / mask_f.sum(dim=(1, 2)).clamp(min=1.0)
+    cx_norm  = ((cx_pixel / (W - 1)) * 2.0 - 1.0) * visible.float()
 
     return visible, cx_norm, area
 
 
 # =============================================================================
-# MAIN ENVIRONMENT
+# ENVIRONMENT
 # =============================================================================
 
 class IrisBallEnv(DirectRLEnv):
-    """
-    Iris drone yellow ball tracking.
-    Mirrors JetbotNavEnv structure exactly — same scene setup pattern,
-    same observation construction, same reward components adapted for a drone.
-    """
 
     cfg: IrisBallEnvCfg
 
@@ -111,282 +199,154 @@ class IrisBallEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         N = self.num_envs
+        self._ball_pos_w   = torch.zeros(N, 3, device=self.device)
+        self._prev_dist    = torch.zeros(N, device=self.device)
+        self._ball_visible = torch.zeros(N, dtype=torch.bool, device=self.device)
+        self._ball_cx      = torch.zeros(N, device=self.device)
+        self._searching    = torch.ones(N, dtype=torch.bool, device=self.device)
+        self._succeeded    = torch.zeros(N, dtype=torch.bool, device=self.device)
+        self._actions      = torch.zeros(N, 2, device=self.device)
+        self._step_count   = 0
 
-        # Ball world positions (set at reset)
-        self._ball_pos_w = torch.zeros(N, 3, device=self.device)
-
-        # Distance to ball (for delta-distance reward, same as jetbot)
-        self._prev_dist = torch.zeros(N, device=self.device)
-
-        # Search state: True when ball not visible
-        self._searching = torch.ones(N, dtype=torch.bool, device=self.device)
-
-        # Success flag — drone has reached stop distance at least once
-        self._succeeded = torch.zeros(N, dtype=torch.bool, device=self.device)
-
-        # Rotor joint indices
-        self._rotor_ids = None   # set after articulation init
-
-        # Visualisation markers
-        self._ball_marker  = self._make_ball_vis_marker()
-        self._drone_marker = self._make_drone_vis_marker()
-
-        self._ball_marker.set_visibility(True)
-        self._drone_marker.set_visibility(True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Markers
-    # ─────────────────────────────────────────────────────────────────────────
-    def _make_ball_vis_marker(self) -> VisualizationMarkers:
-        cfg = VisualizationMarkersCfg(
-            prim_path="/Visuals/BallMarker",
-            markers={
-                "sphere": sim_utils.SphereCfg(
-                    radius=0.18,
-                    visual_material=sim_utils.PreviewSurfaceCfg(
-                        diffuse_color=(1.0, 1.0, 0.0)
-                    ),
-                )
-            },
+        self._ball_marker  = self._make_marker(
+            "/Visuals/BallMarker", "sphere",
+            sim_utils.SphereCfg(radius=0.18,
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0)))
         )
-        return VisualizationMarkers(cfg)
-
-    def _make_drone_vis_marker(self) -> VisualizationMarkers:
-        cfg = VisualizationMarkersCfg(
-            prim_path="/Visuals/DroneMarker",
-            markers={
-                "arrow": sim_utils.UsdFileCfg(
-                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                    scale=(0.3, 0.3, 0.6),
-                    visual_material=sim_utils.PreviewSurfaceCfg(
-                        diffuse_color=(0.0, 0.8, 1.0)
-                    ),
-                )
-            },
+        self._drone_marker = self._make_marker(
+            "/Visuals/DroneMarker", "arrow",
+            sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                scale=(0.3, 0.3, 0.6),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.8, 1.0)),
+            )
         )
-        return VisualizationMarkers(cfg)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Scene setup — mirrors jetbot pattern
-    # ─────────────────────────────────────────────────────────────────────────
+    def _make_marker(self, path: str, key: str, shape_cfg) -> VisualizationMarkers:
+        m = VisualizationMarkers(VisualizationMarkersCfg(
+            prim_path=path, markers={key: shape_cfg}))
+        m.set_visibility(True)
+        return m
+
+    # ── Scene ─────────────────────────────────────────────────────────────────
     def _setup_scene(self):
-        # Terrain
         self.cfg.terrain.num_envs    = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-
-        # Lighting
-        if hasattr(self.cfg, "sky_light") and self.cfg.sky_light is not None:
-            self.cfg.sky_light.spawn.func(
-                self.cfg.sky_light.prim_path,
-                self.cfg.sky_light.spawn,
-            )
-
-        # Robot
-        self._robot = Articulation(self.cfg.robot)
-        self.scene.articulations["robot"] = self._robot
-
-        # Ball
-        self._ball = RigidObject(self.cfg.ball)
-        self.scene.rigid_objects["ball"] = self._ball
-
-        # Camera
+        self.cfg.sky_light.spawn.func(self.cfg.sky_light.prim_path,
+                                      self.cfg.sky_light.spawn)
+        self._robot  = Articulation(self.cfg.robot)
+        self._ball   = RigidObject(self.cfg.ball)
         self._camera = TiledCamera(self.cfg.tiled_camera)
+        self.scene.articulations["robot"]  = self._robot
+        self.scene.rigid_objects["ball"]   = self._ball
         self.scene.sensors["tiled_camera"] = self._camera
-
         self.scene.clone_environments(copy_from_source=False)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Action pipeline — same P-controller altitude hold as all drone envs
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Actions ───────────────────────────────────────────────────────────────
     def _pre_physics_step(self, actions: torch.Tensor):
-        self._actions = actions.clone().clamp(-1.0, 1.0)
+        self._actions    = actions.clone().clamp(-1.0, 1.0)
+        lin_vel_b        = torch.zeros(self.num_envs, 3, device=self.device)
+        lin_vel_b[:, 0]  = self._actions[:, 0] * self.cfg.max_forward_vel
 
-        # Forward velocity in body frame
-        lin_vel_b = torch.zeros(self.num_envs, 3, device=self.device)
-        lin_vel_b[:, 0] = self._actions[:, 0] * self.cfg.max_forward_vel
+        vz = (self.cfg.altitude_kp *
+              (self.cfg.hover_height + self._terrain.env_origins[:, 2]
+               - self._robot.data.root_pos_w[:, 2])
+              ).clamp(-self.cfg.max_altitude_vel, self.cfg.max_altitude_vel)
 
-        # Altitude P-controller
-        target_z  = self.cfg.hover_height + self._terrain.env_origins[:, 2]
-        current_z = self._robot.data.root_pos_w[:, 2]
-        vz = (self.cfg.altitude_kp * (target_z - current_z)).clamp(
-            -self.cfg.max_altitude_vel, self.cfg.max_altitude_vel
-        )
-
-        # Body → world
-        quat_w    = self._robot.data.root_state_w[:, 3:7]
-        lin_vel_w = _quat_rotate(quat_w, lin_vel_b)
+        lin_vel_w       = _quat_rotate(self._robot.data.root_state_w[:, 3:7], lin_vel_b)
         lin_vel_w[:, 2] = vz
-
-        ang_vel_w = torch.zeros(self.num_envs, 3, device=self.device)
+        ang_vel_w       = torch.zeros(self.num_envs, 3, device=self.device)
         ang_vel_w[:, 2] = self._actions[:, 1] * self.cfg.max_yaw_rate
 
-        self._robot.write_root_velocity_to_sim(
-            torch.cat([lin_vel_w, ang_vel_w], dim=-1)
-        )
+        self._robot.write_root_velocity_to_sim(torch.cat([lin_vel_w, ang_vel_w], dim=-1))
 
-        # Spin rotors (cosmetic)
         jv = torch.zeros_like(self._robot.data.joint_vel)
         jv[:, 0], jv[:, 1] =  200.0, -200.0
         jv[:, 2], jv[:, 3] =  200.0, -200.0
         self._robot.set_joint_velocity_target(jv)
 
-        # Update ball marker
         self._ball_marker.visualize(self._ball_pos_w)
-        self._drone_marker.visualize(
-            self._robot.data.root_pos_w,
-            self._robot.data.root_quat_w,
-        )
+        drone_pos       = self._robot.data.root_pos_w.clone()
+        drone_pos[:, 2] += 0.3
+        self._drone_marker.visualize(drone_pos, self._robot.data.root_quat_w)
 
     def _apply_action(self):
-        pass   # velocity written in _pre_physics_step
+        pass
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Observations — mirrors jetbot exactly
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Observations ──────────────────────────────────────────────────────────
     def _get_observations(self) -> dict:
-        """
-        Returns {"policy": (N, T, H, W, 4)}.
+        raw = self._camera.data.output["rgb"]
+        rgb = (raw.float() / 255.0 if raw.dtype == torch.uint8
+               else raw.float().clamp(0.0, 1.0))
 
-        Channel layout:
-            0-2: RGB normalised [0,1]
-            3:   search_active (1.0 if ball not visible, 0.0 if visible)
-                 expanded spatially so CNN can process it per-pixel.
+        self._ball_visible, self._ball_cx, _ = _detect_yellow(
+            rgb, self.cfg.yellow_threshold)
+        self._searching = ~self._ball_visible
 
-        The search_active channel plays the same role as the jetbot's
-        goal vector — it gives the policy non-visual state information
-        embedded into the spatial structure the CNN expects.
-        """
-        # Raw RGB from camera: (N, H, W, 3) uint8 or float
-        raw_rgb = self._camera.data.output["rgb"]
-        if raw_rgb.dtype == torch.uint8:
-            rgb_f = raw_rgb.float() / 255.0
-        else:
-            rgb_f = raw_rgb.float().clamp(0.0, 1.0)
-        # rgb_f: (N, H, W, 3)
-
-        # Detect yellow ball in current frame
-        visible, cx_norm, area = _detect_yellow(rgb_f, self.cfg.yellow_threshold)
-        self._ball_visible = visible
-        self._ball_cx      = cx_norm    # (N,) horizontal centroid, [-1, 1]
-        self._searching    = ~visible   # (N,) True = searching
-
-        # Build search_active channel: (N, H, W, 1)
-        N, H, W = rgb_f.shape[:3]
+        N, H, W   = rgb.shape[:3]
         search_ch = self._searching.float().view(N, 1, 1, 1).expand(N, H, W, 1)
+        frame     = torch.cat([rgb, search_ch], dim=-1)   # (N, H, W, 4)
 
-        # Combine: (N, H, W, 4)
-        frame = torch.cat([rgb_f, search_ch], dim=-1)
-
-        # Build history stack — same as jetbot
         if self._camera_hist is None:
-            self._camera_hist = (
-                frame.unsqueeze(1)
-                .repeat(1, self.cfg.history_len, 1, 1, 1)
-                .contiguous()
-            )
+            self._camera_hist = frame.unsqueeze(1).repeat(
+                1, self.cfg.history_len, 1, 1, 1).contiguous()
         else:
             self._camera_hist = torch.cat(
-                [self._camera_hist[:, 1:], frame.unsqueeze(1)], dim=1
-            )
+                [self._camera_hist[:, 1:], frame.unsqueeze(1)], dim=1)
 
         return {"policy": self._camera_hist}
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Rewards — vision-based, ball world position never used for reward
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Rewards ───────────────────────────────────────────────────────────────
     def _get_rewards(self) -> torch.Tensor:
-        """
-        Five reward components, each serving a different phase of the task:
+        self._step_count += 1
+        dist = torch.linalg.norm(
+            self._robot.data.root_pos_w - self._ball_pos_w, dim=-1)
 
-        1. approach_reward:   reward for getting closer to ball
-                              (only when visible AND farther than stop_distance)
-        2. alignment_reward:  reward for keeping ball centred in frame
-                              (yaw correction signal)
-        3. hover_reward:      reward for hovering at exactly stop_distance
-                              (the actual goal behaviour)
-        4. search_reward:     small reward for yawing while searching
-                              (prevents the drone from just hovering mid-air)
-        5. success_bonus:     one-time bonus for first reaching stop_distance
-
-        Note: we compute actual distance to ball here (the reward function
-        can see world state). The POLICY can not — it only sees RGB.
-        """
-        pos  = self._robot.data.root_pos_w
-        dist = torch.linalg.norm(pos - self._ball_pos_w, dim=-1)   # (N,)
-
-        # ── 1. Approach reward ───────────────────────────────────────────────
-        # Reward for closing distance, but only when outside stop_distance.
-        # When inside stop_distance, approach is NOT rewarded (prevents overshoot).
-        dist_delta     = self._prev_dist - dist
+        # 1. Approach — reward closing distance
+        delta           = self._prev_dist - dist
         self._prev_dist = dist.clone()
-        beyond_stop    = (dist > self.cfg.stop_distance).float()
-        approach_r     = dist_delta * beyond_stop * self.cfg.approach_scale
+        approach_r      = delta * self.cfg.approach_scale
 
-        # ── 2. Alignment reward ──────────────────────────────────────────────
-        # Ball centred in frame (cx_norm ≈ 0) = high reward.
-        # Not visible = zero reward (don't reward for accidental centring).
-        centred    = (1.0 - self._ball_cx.abs()).clamp(0.0, 1.0)
-        alignment_r = centred * self._ball_visible.float() * self.cfg.alignment_scale
+        # 2. Hover — continuous reward for being within stop distance
+        at_stop   = dist < self.cfg.stop_distance
+        success_r = at_stop.float() * self.cfg.hover_scale
 
-        # ── 3. Hover reward ──────────────────────────────────────────────────
-        # Reward for being at stop_distance (±0.2m tolerance).
-        # This is the hardest reward to earn — requires both approach AND stop.
-        at_stop    = (dist - self.cfg.stop_distance).abs() < 0.2
-        hover_r    = at_stop.float() * self._ball_visible.float() * self.cfg.hover_scale
-
-        # ── 4. Search reward ─────────────────────────────────────────────────
-        # Small reward for rotating (yaw action) when searching.
-        # Prevents degenerate "hover and do nothing" during search.
-        yaw_action  = self._actions[:, 1].abs()
-        search_r    = yaw_action * self._searching.float() * self.cfg.search_scale
-
-        # ── 5. Success bonus ─────────────────────────────────────────────────
-        just_succeeded = at_stop & self._ball_visible & ~self._succeeded
-        self._succeeded |= just_succeeded
-        success_r = just_succeeded.float() * self.cfg.success_bonus
-
-        # ── Time penalty ─────────────────────────────────────────────────────
+        # 3. Time penalty
         time_r = torch.full(
-            (self.num_envs,), self.cfg.time_penalty, device=self.device
-        )
+            (self.num_envs,), self.cfg.time_penalty, device=self.device)
 
-        total = approach_r + alignment_r + hover_r + search_r + success_r + time_r
+        total = approach_r + success_r + time_r
+
+        if self._step_count % 200 == 0:
+            print(f"\n{'='*50}  step={self._step_count}")
+            print(f"  dist={float(dist.mean()):.2f}m  "
+                f"visible={float(self._ball_visible.float().mean()*100):.0f}%  "
+                f"at_stop={float(at_stop.float().mean()*100):.0f}%")
+            for n, r in zip(
+                ["approach", "success", "time"],
+                [approach_r, success_r, time_r],
+            ):
+                print(f"  {n:<10} {float(r.mean()):+.4f}")
+            print(f"  {'total':<10} {float(total.mean()):+.4f}")
 
         self.extras["log"] = {
-            "visible_pct":  float(self._ball_visible.float().mean() * 100),
-            "dist_mean":    float(dist.mean()),
-            "at_stop_pct":  float(at_stop.float().mean() * 100),
-            "success_rate": float(self._succeeded.float().mean()),
-            "searching_pct":float(self._searching.float().mean() * 100),
+            "visible_pct": float(self._ball_visible.float().mean() * 100),
+            "dist_mean":   float(dist.mean()),
+            "at_stop_pct": float(at_stop.float().mean() * 100),
         }
-
         return total
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Termination
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Termination ───────────────────────────────────────────────────────────
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        alt_fail = ((self._robot.data.root_pos_w[:, 2] < 0.1) |
+                    (self._robot.data.root_pos_w[:, 2] > 3.0))
+        too_far  = torch.linalg.norm(
+            self._robot.data.root_pos_w - self._ball_pos_w, dim=-1) > 8.0
+        return alt_fail | too_far, time_out
 
-        # Altitude failure
-        alt_fail = (
-            (self._robot.data.root_pos_w[:, 2] < 0.1) |
-            (self._robot.data.root_pos_w[:, 2] > 3.0)
-        )
-
-        # Drone too far from ball (flew the wrong way for too long)
-        dist = torch.linalg.norm(
-            self._robot.data.root_pos_w - self._ball_pos_w, dim=-1
-        )
-        too_far = dist > 8.0
-
-        died = alt_fail | too_far
-        return died, time_out
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Reset — mirrors jetbot _reset_idx
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Reset ─────────────────────────────────────────────────────────────────
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
@@ -394,66 +354,45 @@ class IrisBallEnv(DirectRLEnv):
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
 
-        N_reset = len(env_ids)
+        N_r     = len(env_ids)
         origins = self._terrain.env_origins[env_ids]
 
-        # ── Reset drone ──────────────────────────────────────────────────────
-        state = self._robot.data.default_root_state[env_ids].clone()
-        state[:, :3] = origins + torch.tensor(
-            [0.0, 0.0, self.cfg.hover_height], device=self.device
-        )
-
-        # Random spawn yaw — drone doesn't start facing the ball
-        rand_yaw = torch.rand(N_reset, device=self.device) * 2 * math.pi
-        half     = rand_yaw * 0.5
-        state[:, 3] = torch.cos(half)   # w
-        state[:, 4] = 0.0               # x
-        state[:, 5] = 0.0               # y
-        state[:, 6] = torch.sin(half)   # z
+        # Drone: random yaw, fixed hover height
+        state        = self._robot.data.default_root_state[env_ids].clone()
+        state[:, :3] = origins + torch.tensor([0., 0., self.cfg.hover_height], device=self.device)
+        half         = torch.rand(N_r, device=self.device) * math.pi
+        state[:, 3]  = torch.cos(half)
+        state[:, 4]  = 0.0
+        state[:, 5]  = 0.0
+        state[:, 6]  = torch.sin(half)
         state[:, 7:] = 0.0
-
         self._robot.write_root_pose_to_sim(state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(state[:, 7:], env_ids)
-        jp = self._robot.data.default_joint_pos[env_ids]
-        jv = self._robot.data.default_joint_vel[env_ids]
-        self._robot.write_joint_state_to_sim(jp, jv, None, env_ids)
-
-        # ── Reset ball ───────────────────────────────────────────────────────
-        # Random position in a ring around the drone
-        radii  = torch.empty(N_reset, device=self.device).uniform_(
-            self.cfg.ball_min_dist, self.cfg.ball_max_dist
-        )
-        thetas = torch.empty(N_reset, device=self.device).uniform_(
-            -math.pi, math.pi
+        self._robot.write_joint_state_to_sim(
+            self._robot.data.default_joint_pos[env_ids],
+            self._robot.data.default_joint_vel[env_ids],
+            None, env_ids,
         )
 
-        ball_state = self._ball.data.default_root_state[env_ids].clone()
-        ball_state[:, 0] = origins[:, 0] + radii * torch.cos(thetas)
-        ball_state[:, 1] = origins[:, 1] + radii * torch.sin(thetas)
-        ball_state[:, 2] = 0.15   # ball radius — sits on ground
-        ball_state[:, 3] = 1.0    # quaternion w
-        ball_state[:, 4:7] = 0.0
+        # Ball: random ring
+        r      = torch.empty(N_r, device=self.device).uniform_(
+            self.cfg.ball_min_dist, self.cfg.ball_max_dist)
+        theta  = torch.empty(N_r, device=self.device).uniform_(-math.pi, math.pi)
+        bstate = self._ball.data.default_root_state[env_ids].clone()
+        bstate[:, 0] = origins[:, 0] + r * torch.cos(theta)
+        bstate[:, 1] = origins[:, 1] + r * torch.sin(theta)
+        bstate[:, 2] = 0.9
+        bstate[:, 3] = 1.0
+        bstate[:, 4:7] = 0.0
+        self._ball.write_root_state_to_sim(bstate, env_ids)
+        self._ball_pos_w[env_ids] = bstate[:, :3]
 
-        self._ball.write_root_state_to_sim(ball_state, env_ids)
-
-        # Cache ball world positions for reward computation
-        self._ball_pos_w[env_ids, 0] = ball_state[:, 0]
-        self._ball_pos_w[env_ids, 1] = ball_state[:, 1]
-        self._ball_pos_w[env_ids, 2] = ball_state[:, 2]
-
-        # ── Reset bookkeeping ────────────────────────────────────────────────
         if self._camera_hist is not None:
             self._camera_hist[env_ids] = 0.0
-
         self._succeeded[env_ids] = False
         self._searching[env_ids] = True
-
-        # prev_dist from reset position
-        dist0 = torch.linalg.norm(
-            self._robot.data.root_pos_w[env_ids] - self._ball_pos_w[env_ids],
-            dim=-1,
-        )
-        self._prev_dist[env_ids] = dist0
+        self._prev_dist[env_ids] = torch.linalg.norm(
+            self._robot.data.root_pos_w[env_ids] - self._ball_pos_w[env_ids], dim=-1)
 
 
 # =============================================================================
@@ -461,8 +400,6 @@ class IrisBallEnv(DirectRLEnv):
 # =============================================================================
 
 def _quat_rotate(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Rotate vectors v by quaternions q. Isaac Lab convention: (w, x, y, z)."""
-    w   = q[:, 0:1]
-    xyz = q[:, 1:]
-    t   = 2.0 * torch.linalg.cross(xyz, v)
+    w, xyz = q[:, 0:1], q[:, 1:]
+    t = 2.0 * torch.linalg.cross(xyz, v)
     return v + w * t + torch.linalg.cross(xyz, t)

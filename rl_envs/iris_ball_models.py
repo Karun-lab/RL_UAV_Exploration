@@ -16,7 +16,7 @@ Architecture:
     → Fusion MLP → shared embedding (N, 256)
     → policy head: mean action (N, 2)
     → value head:  scalar value (N, 1)
-
+ 
 Why CNN per frame then concatenate (vs 3D conv or LSTM)?
     Same reason as the jetbot: simple, fast, and the policy gets explicit
     per-frame features that it can compare across time to infer velocity.
@@ -28,12 +28,12 @@ Why channel 4 (search_active) in the CNN instead of a separate MLP?
     AND search_active=1, rotate" as a spatial-visual rule rather than a
     separate logical branch. This mirrors how the jetbot goal vector works.
 """
- 
+  
 import torch
 import torch.nn as nn
 from skrl.models.torch import Model, GaussianMixin, DeterministicMixin
 from skrl.utils.spaces.torch import unflatten_tensorized_space
-
+ 
 
 class IrisBallModel(GaussianMixin, DeterministicMixin, Model):
     """

@@ -1,0 +1,9 @@
+# skrl_ppo_ball_cfg.yaml
+# Minimal config — actual hyperparameters are in iris_ball_agent.py
+# This file exists only to satisfy Isaac Lab's registry lookup.
+seed: 42
+
+trainer:
+  class: SequentialTrainer
+  timesteps: 500000
+  environment_info: log

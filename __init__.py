@@ -103,10 +103,21 @@ from .rl_envs import iris_ball_env   # ← add to existing import block
 gym.register(
     id="Isaac-Iris-Ball-v0",
     entry_point="rl_WorkSpace.rl_envs.iris_ball_env:IrisBallEnv",
+    disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point":
-            "rl_WorkSpace.rl_envs.iris_ball_env_cfg:IrisBallEnvCfg",
-        "skrl_cfg_entry_point":
-            "rl_WorkSpace.agents:skrl_ppo_ball_cfg.yaml",
+        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_ball_env:IrisBallEnvCfg",
+        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_ball_cfg.yaml",
+    },
+)
+
+from .rl_envs import iris_door_env   # ← add to existing import block
+
+gym.register(
+    id="Isaac-Iris-Door-v0",
+    entry_point="rl_WorkSpace.rl_envs.iris_door_env:IrisDoorEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_door_env:IrisDoorEnvCfg",
+        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_door_cfg.yaml",
     },
 )
