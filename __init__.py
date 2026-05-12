@@ -121,3 +121,40 @@ gym.register(
         "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_door_cfg.yaml",
     },
 )
+
+from .rl_envs import iris_ego_env   # ← add to existing import block
+
+gym.register(
+    id="Isaac-Iris-Ego-v0",
+    entry_point="rl_WorkSpace.rl_envs.iris_ego_env:IrisEgoEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_ego_env:IrisEgoEnvCfg",
+        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_ego_cfg.yaml",
+    },
+)
+
+from .rl_envs import iris_frontier_env   # ← add to existing import block
+
+gym.register(
+    id="Isaac-Iris-Frontier-v0",
+    entry_point="rl_WorkSpace.rl_envs.iris_frontier_env:IrisFrontierEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_frontier_env:IrisfrontierEnvCfg",
+        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_frontier_cfg.yaml",
+    },
+)
+
+
+from .rl_envs import iris_icm_exploration   # ← add to existing import block
+
+gym.register(
+    id="Isaac-Iris-ICM-v0",
+    entry_point="rl_WorkSpace.rl_envs.iris_icm_exploration:IrisICMOfficeEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_icm_exploration:IrisICMOfficeEnvCfg",
+        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_icm_cfg.yaml",
+    },
+)

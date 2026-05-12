@@ -39,7 +39,7 @@ from isaaclab_assets.robots.iris import IRIS_CFG
 @configclass
 class IrisBallEnvCfg(DirectRLEnvCfg):
 
-    episode_length_s = 30.0
+    episode_length_s = 10.0
     decimation       = 2
 
     sim: SimulationCfg = SimulationCfg(
@@ -140,7 +140,7 @@ class IrisBallEnvCfg(DirectRLEnvCfg):
 
     # Ball spawn
     ball_min_dist: float = 1.5
-    ball_max_dist: float = 3.5
+    ball_max_dist: float = 5.5 
 
     # Rewards — optimised for fast learning
     # Higher approach + alignment scales surface the task signal early.
