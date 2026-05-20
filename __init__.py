@@ -150,7 +150,7 @@ gym.register(
 from .rl_envs import iris_icm_exploration   # ← add to existing import block
 
 gym.register(
-    id="Isaac-Iris-ICM-v0",
+    id="Isaac-Iris-ICM-v1",
     entry_point="rl_WorkSpace.rl_envs.iris_icm_exploration:IrisICMOfficeEnv",
     disable_env_checker=True,
     kwargs={

@@ -30,7 +30,7 @@ from rl_WorkSpace.rl_envs.iris_icm_office_agent import get_agent
 cfg = IrisICMOfficeEnvCfg()
 cfg.scene.num_envs = args_cli.num_envs
 
-env = gym.make("Isaac-Iris-ICM-v0", cfg=cfg)
+env = gym.make("Isaac-Iris-ICM-v1", cfg=cfg)
 env = wrap_env(env)
 
 agent = get_agent(env, device=device)

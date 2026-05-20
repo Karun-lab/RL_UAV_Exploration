@@ -58,7 +58,7 @@ class IrisICMOfficeModel(GaussianMixin, DeterministicMixin, Model):
         self.t_steps = 3
         self.h       = 64
         self.w       = 80
-        self.n_ch    = 1
+        self.n_ch    = 2
 
         # CNN — lighter than ball model (single channel, ICM does feature work)
         self.cnn = nn.Sequential(

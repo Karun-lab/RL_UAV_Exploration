@@ -77,7 +77,7 @@ def main():
     # Build env
     cfg = IrisICMOfficeEnvCfg()
     cfg.scene.num_envs = args_cli.num_envs
-    env_raw = gym.make("Isaac-Iris-ICM-v0", cfg=cfg)
+    env_raw = gym.make("Isaac-Iris-ICM-v1", cfg=cfg)
     env     = wrap_env(env_raw)
 
     # Build agent using your Python agent file
