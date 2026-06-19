@@ -14,7 +14,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
 from rl_WorkSpace.models.drone import IRIS_CFG
 
-#from isaaclab_assets.robots.iris import IRIS_CFG
+
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
 

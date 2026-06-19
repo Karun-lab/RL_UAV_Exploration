@@ -5,7 +5,6 @@ from . import agents
 from .rl_envs import (
     iris_target_env,
     iris_explore_env,
-    iris_explore_walls_env,
     iris_maze_env,
 ) 
 print(">>> rl_WorkSpace __init__ LOADED")
@@ -27,14 +26,7 @@ gym.register(
     },
 )
 
-gym.register(
-    id="Isaac-Iris-Walls-v0",
-    entry_point=f"{__name__}.rl_envs.iris_explore_walls_env:IrisExploreWallsEnv",
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.rl_envs.iris_explore_walls_env:IrisExploreWallsEnvCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_explore_cfg.yaml",
-    },
-)
+
 gym.register(
     id="Isaac-Iris-Maze-v0",
     entry_point=f"{__name__}.rl_envs.iris_maze_env:IrisMazeEnv",
@@ -107,30 +99,6 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_ball_env:IrisBallEnvCfg",
         "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_ball_cfg.yaml",
-    },
-)
-
-from .rl_envs import iris_door_env   # ← add to existing import block
-
-gym.register(
-    id="Isaac-Iris-Door-v0",
-    entry_point="rl_WorkSpace.rl_envs.iris_door_env:IrisDoorEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_door_env:IrisDoorEnvCfg",
-        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_door_cfg.yaml",
-    },
-)
-
-from .rl_envs import iris_ego_env   # ← add to existing import block
-
-gym.register(
-    id="Isaac-Iris-Ego-v0",
-    entry_point="rl_WorkSpace.rl_envs.iris_ego_env:IrisEgoEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_ego_env:IrisEgoEnvCfg",
-        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_ego_cfg.yaml",
     },
 )
 

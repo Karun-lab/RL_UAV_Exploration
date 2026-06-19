@@ -29,7 +29,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 import gymnasium as gym
-from isaaclab_assets.robots.iris import IRIS_CFG
+from rl_WorkSpace.models.drone.iris import IRIS_CFG
 
 
 # =============================================================================
