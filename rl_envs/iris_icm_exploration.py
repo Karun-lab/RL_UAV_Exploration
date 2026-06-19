@@ -41,7 +41,7 @@ Crop: 20×20 cells around drone (5m radius) → resize to 64×80 to match depth.
       Only local neighbourhood is shown — policy doesn't need to know
       about visits 20m away, only immediate surroundings.
 
-DEPLOYMENT NOTE
+DEPLOYMENT NOTE 
 ---------------
 On the Jetson Orin, run this at 50Hz alongside the policy:
     - Get drone pose from SLAM (x, y in metres)
@@ -71,7 +71,9 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 import gymnasium as gym
-from isaaclab_assets.robots.iris import IRIS_CFG
+# from isaaclab_assets.robots.iris import IRIS_CFG
+from rl_WorkSpace.models.drone.iris import IRIS_CFG
+
 
 
 
