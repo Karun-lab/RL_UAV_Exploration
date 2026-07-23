@@ -25,7 +25,7 @@ import rl_WorkSpace
 device = torch.device("cuda:0")
 
 from rl_WorkSpace.rl_envs.iris_icm_exploration import IrisICMOfficeEnvCfg
-from rl_WorkSpace.rl_envs.iris_icm_office_agent import get_agent
+from rl_WorkSpace.rl_envs.iris_icm_agent import get_agent
 
 cfg = IrisICMOfficeEnvCfg()
 cfg.scene.num_envs = args_cli.num_envs

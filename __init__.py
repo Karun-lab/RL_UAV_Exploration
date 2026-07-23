@@ -17,33 +17,16 @@ gym.register(
     },
 )
 
+from .rl_envs import iris_ball_env   
 gym.register(
-    id="Isaac-Iris-Explore-v0",
-    entry_point=f"{__name__}.rl_envs.iris_explore_env:IrisExploreEnv",
+    id="Isaac-Iris-Ball-v0",
+    entry_point="rl_WorkSpace.rl_envs.iris_ball_env:IrisBallEnv",
+    disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.rl_envs.iris_explore_env:IrisExploreEnvCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_explore_cfg.yaml",
+        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_ball_env:IrisBallEnvCfg",
+        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_ball_cfg.yaml",
     },
 )
-
-
-gym.register(
-    id="Isaac-Iris-Maze-v0",
-    entry_point=f"{__name__}.rl_envs.iris_maze_env:IrisMazeEnv",
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.rl_envs.iris_maze_env:IrisMazeEnvCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_maze_cfg.yaml",
-    },
-)
-gym.register(
-    id="Isaac-Iris-Maze-v1",
-    entry_point=f"{__name__}.rl_envs.iris_explore_corridor:IrisMazeEnv",
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.rl_envs.iris_explore_corridor:IrisMazeEnvCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_maze_cfg.yaml",
-    },
-)
-
 gym.register(
     id="Isaac-Iris-Explore-ICM-v0",
     entry_point="rl_WorkSpace.rl_envs.iris_icm_exploration:IrisExploreEnv",
@@ -55,68 +38,7 @@ gym.register(
     },
 )
 
-gym.register(
-    id="Isaac-Iris-Explore-Ego-v0",
-    entry_point="rl_WorkSpace.rl_envs.iris_explore_ego_env:IrisExploreEgoEnv",
-    kwargs={
-        "env_cfg_entry_point":
-            "rl_WorkSpace.rl_envs.iris_explore_ego_env:IrisExploreEgoEnvCfg",
-        "skrl_cfg_entry_point":
-            "rl_WorkSpace.agents:skrl_ppo_ego_cfg.yaml",
-    },
-)
-
-gym.register(
-    id="Isaac-Iris-Explore-Ego-v1",
-    entry_point="rl_WorkSpace.rl_envs.iris_explore_ego_env:IrisExploreEgoEnv",
-    kwargs={
-        "env_cfg_entry_point":
-            "rl_WorkSpace.rl_envs.iris_explore_ego_env:IrisExploreEgoEnvCfg",
-
-        # ── ADD this for RSL-RL ───────────────────────────────────
-        "rsl_rl_cfg_entry_point":
-            "rl_WorkSpace.agents.rsl_ppo_ego_cfg:EgoRunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-Iris-Frontier-v0",
-    entry_point="rl_WorkSpace.rl_envs.iris_explore_frontier_env:IrisExploreFrontierEnv",
-    kwargs={
-        "env_cfg_entry_point":
-            "rl_WorkSpace.rl_envs.iris_explore_frontier_env:IrisExploreFrontierEnvCfg",
-        "rsl_rl_cfg_entry_point":
-            "rl_WorkSpace.agents.rsl_ppo_frontier_cfg:FrontierRunnerCfg",
-    },
-)
-
-from .rl_envs import iris_ball_env   # ← add to existing import block
-
-gym.register(
-    id="Isaac-Iris-Ball-v0",
-    entry_point="rl_WorkSpace.rl_envs.iris_ball_env:IrisBallEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_ball_env:IrisBallEnvCfg",
-        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_ball_cfg.yaml",
-    },
-)
-
-from .rl_envs import iris_frontier_env   # ← add to existing import block
-
-gym.register(
-    id="Isaac-Iris-Frontier-v0",
-    entry_point="rl_WorkSpace.rl_envs.iris_frontier_env:IrisFrontierEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_frontier_env:IrisfrontierEnvCfg",
-        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_frontier_cfg.yaml",
-    },
-)
-
-
-from .rl_envs import iris_icm_exploration   # ← add to existing import block
-
+from .rl_envs import iris_icm_exploration   
 gym.register(
     id="Isaac-Iris-ICM-v1",
     entry_point="rl_WorkSpace.rl_envs.iris_icm_exploration:IrisICMOfficeEnv",

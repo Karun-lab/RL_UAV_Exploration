@@ -1,5 +1,5 @@
 """
-iris_icm_office_agent.py
+iris_icm_agent.py
 ========================
 SKRL PPO agent + CNN model for ICM-driven office exploration.
 
