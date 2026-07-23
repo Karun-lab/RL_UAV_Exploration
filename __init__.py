@@ -33,8 +33,6 @@ gym.register(
     kwargs={
         "env_cfg_entry_point":
             "rl_WorkSpace.rl_envs.iris_icm_exploration:IrisExploreEnvCfg",
-        "skrl_cfg_entry_point":
-            "rl_WorkSpace.agents:skrl_ppo_icm_cfg.yaml",
     },
 )
 
@@ -45,6 +43,25 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_icm_exploration:IrisICMOfficeEnvCfg",
-        "skrl_cfg_entry_point": "rl_WorkSpace.agents:skrl_ppo_icm_cfg.yaml",
+    },
+)
+
+from .rl_envs import iris_icm_map_env
+gym.register(
+    id="Isaac-Iris-ICM-v2",
+    entry_point="rl_WorkSpace.rl_envs.iris_icm_map_env:IrisICMOfficeEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_icm_map_env:IrisICMOfficeEnvCfg",
+    },
+)
+
+from .rl_envs import iris_icm_lstm_env
+gym.register(
+    id="Isaac-Iris-ICM-LSTM-v0",
+    entry_point="rl_WorkSpace.rl_envs.iris_icm_lstm_env:IrisICMLSTMEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "rl_WorkSpace.rl_envs.iris_icm_lstm_env:IrisICMLSTMEnvCfg",
     },
 )

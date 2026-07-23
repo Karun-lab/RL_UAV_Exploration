@@ -25,7 +25,7 @@ import rl_WorkSpace
 device = torch.device("cuda:0")
 
 from rl_WorkSpace.rl_envs.iris_ball_env import IrisBallEnvCfg
-from rl_WorkSpace.rl_envs.iris_ball_agent import get_agent
+from rl_WorkSpace.agents.iris_ball_agent import get_agent
 
 cfg = IrisBallEnvCfg()
 cfg.scene.num_envs = args_cli.num_envs
